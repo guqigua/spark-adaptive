@@ -30,6 +30,8 @@ private[spark] trait SchedulerBackend {
   def reviveOffers(): Unit
   def defaultParallelism(): Int
 
+  def freeSlotAvail(numTask:Int): Boolean = false;
+
   /**
    * Requests that an executor kills a running task.
    *

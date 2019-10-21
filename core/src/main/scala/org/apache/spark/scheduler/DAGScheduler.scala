@@ -24,14 +24,12 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import scala.annotation.tailrec
 import scala.collection.Map
-import scala.collection.mutable.{ArrayStack, HashMap, HashSet}
+import scala.collection.mutable.{ArrayBuffer, ArrayStack, HashMap, HashSet}
 import scala.concurrent.duration._
 import scala.language.existentials
 import scala.language.postfixOps
 import scala.util.control.NonFatal
-
 import org.apache.commons.lang3.SerializationUtils
-
 import org.apache.spark._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.executor.TaskMetrics
@@ -161,6 +159,14 @@ class DAGScheduler(
   private[scheduler] val failedStages = new HashSet[Stage]
 
   private[scheduler] val activeJobs = new HashSet[ActiveJob]
+
+
+  val removeStageBarrier= SparkEnv.get.conf.getBoolean("spark.shuffle.removeStageBarrier",false)
+  if(removeStageBarrier){
+    logInfo("DAG remove barrier is on")
+  }
+
+  private val dependantStagePreStarted = new HashMap[Stage,ArrayBuffer[Stage]]()
 
   /**
    * Contains the locations that each RDD's partitions are cached on.  This map's keys are RDD ids
@@ -1106,16 +1112,62 @@ class DAGScheduler(
     }
   }
 
+  // Select a waiting stage to pre-start
+  private def getPreStartableStage(stage: Stage): Option[Stage] = {
+    for (waitingStage <- waitingStages) {
+      val missingParents = getMissingParentStages(waitingStage)
+      if(missingParents.contains(stage)){
+        for (parent <- missingParents) {
+          if(!(waitingStages.contains(parent) || failedStages.contains(parent)
+            || getMissingParentStages(parent).size > 0 || parent.rdd.getStorageLevel != StorageLevel.NONE)){
+            return Some(waitingStage)
+          }
+        }
+      }
+    }
+    None
+  }
+
+  private def maybePreStartWaitingStage(stage: Stage,shuffleId: Int,mapId: Int,status: MapStatus) {
+    if (removeStageBarrier && taskScheduler.isInstanceOf[TaskSchedulerImpl]) {
+      val backend = taskScheduler.asInstanceOf[TaskSchedulerImpl].backend
+      var numPendingTask:Int = 0
+      runningStages.foreach { stage =>
+        numPendingTask += getMissingParentStages(stage).size
+      }
+      val numWaitingStage = waitingStages.size
+      if (backend.freeSlotAvail(numPendingTask) && numWaitingStage > 0 ) {
+        for (preStartStage <- getPreStartableStage(stage)) {
+          logInfo("Pre-start stage " + preStartStage.id)
+          // Register map output finished so far
+          mapOutputTracker.registerMapOutput(shuffleId,mapId,status)
+          waitingStages -= preStartStage
+          runningStages += preStartStage
+          // Inform parent stages that the dependant stage has been pre-started
+          for (parentStage <- getMissingParentStages(preStartStage)
+               if runningStages.contains(parentStage)) {
+            dependantStagePreStarted.getOrElseUpdate(
+              parentStage, new ArrayBuffer[Stage]()) += preStartStage
+          }
+          submitMissingTasks(preStartStage, activeJobForStage(preStartStage).get)
+        }
+      }
+    }
+  }
+
+
+
+
   /**
-   * Merge local values from a task into the corresponding accumulators previously registered
-   * here on the driver.
-   *
-   * Although accumulators themselves are not thread-safe, this method is called only from one
-   * thread, the one that runs the scheduling loop. This means we only handle one task
-   * completion event at a time so we don't need to worry about locking the accumulators.
-   * This still doesn't stop the caller from updating the accumulator outside the scheduler,
-   * but that's not our problem since there's nothing we can do about that.
-   */
+    * Merge local values from a task into the corresponding accumulators previously registered
+    * here on the driver.
+    *
+    * Although accumulators themselves are not thread-safe, this method is called only from one
+    * thread, the one that runs the scheduling loop. This means we only handle one task
+    * completion event at a time so we don't need to worry about locking the accumulators.
+    * This still doesn't stop the caller from updating the accumulator outside the scheduler,
+    * but that's not our problem since there's nothing we can do about that.
+    */
   private def updateAccumulators(event: CompletionEvent): Unit = {
     val task = event.task
     val stage = stageIdToStage(task.stageId)
@@ -1265,6 +1317,10 @@ class DAGScheduler(
               mapOutputTracker.registerMapOutput(
                 shuffleStage.shuffleDep.shuffleId, smt.partitionId, status)
             }
+            // if removeStageBarrier is on we need to register running parent stage(when a task is done)
+            if(removeStageBarrier && dependantStagePreStarted.contains(shuffleStage)){
+              mapOutputTracker.registerMapOutput(shuffleStage.shuffleDep.shuffleId,smt.partitionId,status)
+            }
 
             if (runningStages.contains(shuffleStage) && shuffleStage.pendingPartitions.isEmpty) {
               markStageAsFinished(shuffleStage)
@@ -1291,10 +1347,14 @@ class DAGScheduler(
                   ") because some of its tasks had failed: " +
                   shuffleStage.findMissingPartitions().mkString(", "))
                 submitStage(shuffleStage)
-              } else {
+              } else if (shuffleStage.isAvailable){
                 markMapStageJobsAsFinished(shuffleStage)
                 submitWaitingChildStages(shuffleStage)
               }
+              dependantStagePreStarted -= stage
+            }
+            else if(removeStageBarrier){
+              maybePreStartWaitingStage(stage,shuffleStage.shuffleDep.shuffleId,smt.partitionId,status)
             }
         }
 
@@ -1898,5 +1958,5 @@ private[spark] object DAGScheduler {
   val RESUBMIT_TIMEOUT = 200
 
   // Number of consecutive stage attempts allowed before a stage is aborted
-  val DEFAULT_MAX_CONSECUTIVE_STAGE_ATTEMPTS = 4
+  val DEFAULT_MAX_CONSECUTIVE_STAGE_ATTEMPTS = 50
 }

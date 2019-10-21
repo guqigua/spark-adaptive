@@ -51,6 +51,14 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
   protected val conf = scheduler.sc.conf
   private val maxRpcMessageSize = RpcUtils.maxMessageSizeBytes(conf)
   private val defaultAskTimeout = RpcUtils.askRpcTimeout(conf)
+
+  override def freeSlotAvail(numTask: Int): Boolean = {
+     val flag = numTask * scheduler.CPUS_PER_TASK < totalCoreCount.get()
+    if (flag) logInfo("jiang:have extra cpu resource ")
+    else logInfo("jiang no enough cpu resource")
+    return flag
+  }
+
   // Submit tasks only after (registered resources / total expected resources)
   // is equal to at least this value, that is double between 0 and 1.
   private val _minRegisteredRatio =

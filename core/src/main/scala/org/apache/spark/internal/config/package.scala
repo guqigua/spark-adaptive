@@ -545,4 +545,10 @@ package object config {
       "threshold. Otherwise CompressedMapStatus is used.")
     .intConf
     .createWithDefault(2000)
+
+  private[spark] val REMOVE_STAGE_BARRIER =
+    ConfigBuilder("spark.shuffle.removeStageBarrier")
+      .doc("to do")
+      .booleanConf
+      .createWithDefault(false)
 }
