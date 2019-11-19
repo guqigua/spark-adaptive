@@ -3,13 +3,11 @@ package org.apache.spark.storage
 import java.io.InputStream
 
 import org.apache.spark.{MapOutputTracker, SparkEnv, TaskContext}
-
 import org.apache.spark.internal.{Logging, config}
 
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
-import scala.util.Try
+
 import org.apache.spark.network.shuffle.ShuffleClient
-import org.apache.spark.serializer.Serializer
 
 private[spark]
 class PartialBlockFetcherIterator(
@@ -26,12 +24,12 @@ class PartialBlockFetcherIterator(
   extends Iterator[(BlockId, InputStream)] with Logging {
 
   private val mapOutputFetchInterval =
-    SparkEnv.get.conf.getInt("spark.reducer.mapOutput.fetchInterval", 10000)
+    SparkEnv.get.conf.getInt("spark.reducer.mapOutput.fetchInterval", 1000)
 
   private var iterator: Iterator[(BlockId, InputStream)] = null
 
   // Track the map outputs we've delegated
-  private val delegatedStatuses = new HashSet[Int]()
+  private val delegatedStatuses = new HashSet[String]()
 
   private var fetchTime: Int = 1
 
@@ -53,45 +51,53 @@ class PartialBlockFetcherIterator(
   }
 
 
-  private def readyStatuses = {
-    if(statuses == null)  null
+  private def readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])] = {
+    if(statuses == null)  statuses
     else {
-      var ints = (0 until statuses.size).filter(statuses(_) != null)
-      ints = (0 until statuses.size).filter(statuses(_)._1 != null)
-      ints = (0 until statuses.size).filter(statuses(_)._2 != null)
-      ints = (0 until statuses.size).filter(statuses(_)._2(1) != null)
-      ints = (0 until statuses.size).filter(statuses(_)._2(2) != null)
-
-      if (ints == null || ints.size == 0) null
-      else ints
-
+      statuses.filter(_._1 != null)
+      statuses.foreach(x => x._2.filter(_._1 != null))
+      statuses
     }
   }
-  // Check if there's new map outputs available
+  // Check if there's new map outputs available1232
   private def newStatusesReady = {
-    if(readyStatuses == null) false
-    else readyStatuses.exists(!delegatedStatuses.contains(_))
+    if(readyStatuses == null || readyStatuses.size == 0) false
+    else hashExtraBlock(delegatedStatuses,readyStatuses)
+
+  }
+  private def hashExtraBlock(delegatedStatuses: HashSet[String],
+                             readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])]): Boolean={
+    readyStatuses.foreach( x =>
+      x._2.foreach(y =>
+        if (!delegatedStatuses.contains(x._1 + y._1.toString + y._2)){
+          return true
+        }
+      )
+    )
+    false
+  }
+  private def readyStatusesToIndex(readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])]):Seq[String] = {
+    val res = new ArrayBuffer[String]()
+    readyStatuses.foreach(x =>{
+      x._2.foreach( y => {
+        res.append(x._1 + y._1.toString + y._2)
+      })
+    })
+    res
   }
 
   private def getIterator() = {
     while (!newStatusesReady) {
+      logInfo("jiang : nothing to fetch sleep in partialIterator")
       Thread.sleep(mapOutputFetchInterval)
       updateStatuses()
     }
 
-//    val splitByAddress = new HashMap[BlockManagerId,ArrayBuffer[(Int,Seq[(BlockId, Long)])]]
-
-    for (index <- readyStatuses if !delegatedStatuses.contains(index)){
-//      splitByAddress.getOrElseUpdate(statuses(index)._1,ArrayBuffer()) += ((index,statuses(index)._2))
+    for (index <- readyStatusesToIndex(readyStatuses) if !delegatedStatuses.contains(index)){
       delegatedStatuses += index
     }
 
-//    val afterStatus = Seq[(BlockManagerId, Seq[(BlockId, Long)])] = splitByAddress.toSeq.map{
-//      case(addr,split) =>
-//        (addr,split.map(s => BlockId()))
-//    }
-
-    logDebug("Delegating " + statuses.map(_._2.size).sum +
+    logInfo("Delegating " + statuses.map(_._2.size).sum +
       " blocks to a new iterator for reduce "  + " of shuffle " + shuffleId)
 
     val blockFetcherItr = new ShuffleBlockFetcherIterator(

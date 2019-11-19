@@ -551,4 +551,10 @@ package object config {
       .doc("to do")
       .booleanConf
       .createWithDefault(false)
+
+  private[spark] val REMOVE_STAGE_BARRIER_THRESHOLD =
+    ConfigBuilder("spark.shuffle.removeStageBarrier.threshold")
+      .doc("to do")
+      .intConf
+      .createWithDefault(80)
 }

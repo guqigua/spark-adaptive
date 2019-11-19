@@ -162,6 +162,7 @@ class DAGScheduler(
 
 
   val removeStageBarrier= SparkEnv.get.conf.getBoolean("spark.shuffle.removeStageBarrier",false)
+  val removeStageBarrierThreshold= SparkEnv.get.conf.getInt("spark.shuffle.removeStageBarrier.threshold",80)
   if(removeStageBarrier){
     logInfo("DAG remove barrier is on")
   }
@@ -1115,14 +1116,27 @@ class DAGScheduler(
   // Select a waiting stage to pre-start
   private def getPreStartableStage(stage: Stage): Option[Stage] = {
     for (waitingStage <- waitingStages) {
-      val missingParents = getMissingParentStages(waitingStage)
-      if(missingParents.contains(stage)){
-        for (parent <- missingParents) {
-          if(!(waitingStages.contains(parent) || failedStages.contains(parent)
-            || getMissingParentStages(parent).size > 0 || parent.rdd.getStorageLevel != StorageLevel.NONE)){
+      if (!waitingStage.isInstanceOf[ResultStage]) {
+        val missingParents = getMissingParentStages(waitingStage)
+        if (missingParents.contains(stage)) {
+          val flag = missingParents.exists(parent => (waitingStages.contains(parent) || failedStages.contains(parent)
+            | getMissingParentStages(parent).size > 0 || parent.rdd.getStorageLevel != StorageLevel.NONE) ||
+            ((1 - parent.asInstanceOf[ShuffleMapStage].pendingPartitions.size / parent.numPartitions.toFloat) < removeStageBarrierThreshold / 100.0))
+          if (flag) {
+            logInfo("jiang not all parent have completed")
+            val FP = missingParents.filter(parent =>
+              ((1 - parent.asInstanceOf[ShuffleMapStage].pendingPartitions.size / parent.numPartitions.toFloat) < removeStageBarrierThreshold / 100.0))
+
+            FP.foreach(parent => logInfo("jiang shuffle id  : " + parent.id + " ratio :" + (1 - parent.asInstanceOf[ShuffleMapStage].pendingPartitions.size / parent.numPartitions.toFloat)))
+            return None
+          } else {
+            logInfo("jiang: preStart   " + waitingStage.id)
             return Some(waitingStage)
           }
         }
+      }
+      else{
+        logInfo("jiang: is ResultStage " + waitingStage.id)
       }
     }
     None
@@ -1133,11 +1147,13 @@ class DAGScheduler(
       val backend = taskScheduler.asInstanceOf[TaskSchedulerImpl].backend
       var numPendingTask:Int = 0
       runningStages.foreach { stage =>
-        numPendingTask += getMissingParentStages(stage).size
+        if(stage.isInstanceOf[ShuffleMapStage])
+        numPendingTask += stage.asInstanceOf[ShuffleMapStage].pendingPartitions.size
       }
       val numWaitingStage = waitingStages.size
-      if (backend.freeSlotAvail(numPendingTask) && numWaitingStage > 0 ) {
+      if (numWaitingStage > 0 && backend.freeSlotAvail(numPendingTask)) {
         for (preStartStage <- getPreStartableStage(stage)) {
+          if(backend.freeSlotAvail(numPendingTask)){
           logInfo("Pre-start stage " + preStartStage.id)
           // Register map output finished so far
           mapOutputTracker.registerMapOutput(shuffleId,mapId,status)
@@ -1150,6 +1166,7 @@ class DAGScheduler(
               parentStage, new ArrayBuffer[Stage]()) += preStartStage
           }
           submitMissingTasks(preStartStage, activeJobForStage(preStartStage).get)
+        }
         }
       }
     }
@@ -1317,10 +1334,10 @@ class DAGScheduler(
               mapOutputTracker.registerMapOutput(
                 shuffleStage.shuffleDep.shuffleId, smt.partitionId, status)
             }
-            // if removeStageBarrier is on we need to register running parent stage(when a task is done)
-            if(removeStageBarrier && dependantStagePreStarted.contains(shuffleStage)){
-              mapOutputTracker.registerMapOutput(shuffleStage.shuffleDep.shuffleId,smt.partitionId,status)
-            }
+//            // if removeStageBarrier is on we need to register running parent stage(when a task is done)
+//            if(removeStageBarrier && dependantStagePreStarted.contains(shuffleStage)){
+//              mapOutputTracker.registerMapOutput(shuffleStage.shuffleDep.shuffleId,smt.partitionId,status)
+//            }
 
             if (runningStages.contains(shuffleStage) && shuffleStage.pendingPartitions.isEmpty) {
               markStageAsFinished(shuffleStage)
@@ -1341,19 +1358,24 @@ class DAGScheduler(
               clearCacheLocs()
 
               if (!shuffleStage.isAvailable) {
-                // Some tasks had failed; let's resubmit this shuffleStage.
+                // Some tasks had failed; let's resubmit this shuffleStage
                 // TODO: Lower-level scheduler should also deal with this
                 logInfo("Resubmitting " + shuffleStage + " (" + shuffleStage.name +
                   ") because some of its tasks had failed: " +
                   shuffleStage.findMissingPartitions().mkString(", "))
                 submitStage(shuffleStage)
-              } else if (shuffleStage.isAvailable){
+              } else {
                 markMapStageJobsAsFinished(shuffleStage)
                 submitWaitingChildStages(shuffleStage)
+                dependantStagePreStarted -= stage
               }
-              dependantStagePreStarted -= stage
             }
-            else if(removeStageBarrier){
+            else if(removeStageBarrier &&
+              (1 - (shuffleStage.pendingPartitions.size.toFloat / shuffleStage.numPartitions))
+                > removeStageBarrierThreshold/100.0){
+              logInfo("shuffle Id :"+shuffleStage.id+ "    shuffleStage.pendingPartitions.size"+shuffleStage.pendingPartitions.size
+                +"  shuffleStage.numPartitions"+shuffleStage.numPartitions
+                + "  completed ratio is   "+(1 -shuffleStage.pendingPartitions.size.toFloat / shuffleStage.numPartitions) )
               maybePreStartWaitingStage(stage,shuffleStage.shuffleDep.shuffleId,smt.partitionId,status)
             }
         }
