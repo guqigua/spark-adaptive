@@ -33,6 +33,8 @@ class PartialBlockFetcherIterator(
 
   private var notNullStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])] = null
 
+  private var nextNum: Int = 0
+
   statuses = SparkEnv.get.mapOutputTracker.getUpdatedStatus(shuffleId, startPartition,endPartition,startMapId.getOrElse(-1),endMapId.getOrElse(-1))
 
   initialize()
@@ -49,9 +51,10 @@ class PartialBlockFetcherIterator(
   private def readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])] = {
     if(statuses == null)  statuses
     else {
-      statuses.filter(_._1 != null)
-      statuses.foreach(x => x._2.filter(_._1 != null))
-      statuses
+      val newStatuses = statuses
+      newStatuses.filter(_._1 != null)
+      newStatuses.foreach(x => x._2.filter(_._1 != null))
+      newStatuses
     }
   }
   // Check if there's new map outputs available
@@ -126,6 +129,10 @@ class PartialBlockFetcherIterator(
     while (delegatedStatuses.size < statuses.size) {
       iterator = getIterator()
       if(iterator == null) return false
+      var i = 1
+      for ( i <- 1 to nextNum){
+        iterator.next()
+      }
       if (iterator.hasNext) {
         return true
       }
@@ -134,6 +141,7 @@ class PartialBlockFetcherIterator(
   }
 
   override def next(): (BlockId, InputStream) = {
+    nextNum = nextNum+1
     return iterator.next()
   }
 }
