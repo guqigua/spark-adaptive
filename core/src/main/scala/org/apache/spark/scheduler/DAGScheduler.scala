@@ -23,15 +23,13 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.annotation.tailrec
-import scala.collection.Map
-import scala.collection.mutable.{ArrayStack, HashMap, HashSet}
+import scala.collection.{Map, mutable}
+import scala.collection.mutable.{ArrayBuffer, ArrayStack, HashMap, HashSet}
 import scala.concurrent.duration._
 import scala.language.existentials
 import scala.language.postfixOps
 import scala.util.control.NonFatal
-
 import org.apache.commons.lang3.SerializationUtils
-
 import org.apache.spark._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.executor.TaskMetrics
@@ -161,6 +159,15 @@ class DAGScheduler(
   private[scheduler] val failedStages = new HashSet[Stage]
 
   private[scheduler] val activeJobs = new HashSet[ActiveJob]
+
+  val removeStageBarrier = SparkEnv.get.conf.getBoolean("spark.shuffle.removeStageBarrier", false)
+  val removeStageBarrierThreshold= SparkEnv.get.conf.getInt("spark.shuffle.removeStageBarrier.threshold",80)
+  val removeStageBarrierFactor= SparkEnv.get.conf.getInt("spark.shuffle.removeStageBarrier.factor",1)
+
+  if(removeStageBarrier){
+    logInfo("DAG remove stage barrier is on")
+  }
+
 
   /**
    * Contains the locations that each RDD's partitions are cached on.  This map's keys are RDD ids
@@ -1106,6 +1113,58 @@ class DAGScheduler(
     }
   }
 
+  // Select a waiting stage to pre-start
+  private def getPreStartableStage(stage: Stage): Option[Stage] = {
+    for (waitingStage <- waitingStages) {
+      if (!waitingStage.isInstanceOf[ResultStage]) {
+        val missingParents = getMissingParentStages(waitingStage)
+        if (missingParents.contains(stage)) {
+          val flag = missingParents.exists(parent => (waitingStages.contains(parent) || failedStages.contains(parent)
+            | getMissingParentStages(parent).size > 0 || parent.rdd.getStorageLevel != StorageLevel.NONE) ||
+            ((1 - parent.asInstanceOf[ShuffleMapStage].pendingPartitions.size / parent.numPartitions.toFloat) < removeStageBarrierThreshold / 100.0)
+          ||parent.findMissingPartitions().size * removeStageBarrierFactor > waitingStage.findMissingPartitions().size )
+          if (flag) {
+            logInfo("RSB: not all parent have completed in condition")
+            val FP = missingParents.filter(parent =>
+              ((1 - parent.asInstanceOf[ShuffleMapStage].pendingPartitions.size / parent.numPartitions.toFloat) < removeStageBarrierThreshold / 100.0))
+
+            FP.foreach(parent => logInfo("RSB: shuffle id  : " + parent.id + " ratio :" + (1 - parent.asInstanceOf[ShuffleMapStage].pendingPartitions.size / parent.numPartitions.toFloat)))
+            return None
+          } else {
+            logInfo("RSB: prepare preStart   " + waitingStage.id)
+            return Some(waitingStage)
+          }
+        }
+      }
+      else{
+        logInfo("RSB: is ResultStage can not preStart" + waitingStage.id)
+      }
+    }
+    None
+  }
+
+  private def maybePreStartWaitingStage(stage: Stage,shuffleId: Int,mapId: Int,status: MapStatus) {
+    if (removeStageBarrier && taskScheduler.isInstanceOf[TaskSchedulerImpl]) {
+      val backend = taskScheduler.asInstanceOf[TaskSchedulerImpl].backend
+      var numPendingTask:Int = 0
+      runningStages.foreach { stage =>
+        if(stage.isInstanceOf[ShuffleMapStage])
+          numPendingTask += stage.asInstanceOf[ShuffleMapStage].pendingPartitions.size
+      }
+      val numWaitingStage = waitingStages.size
+      if (numWaitingStage > 0 && backend.freeSlotAvail(numPendingTask)) {
+        for (preStartStage <- getPreStartableStage(stage)) {
+          if(backend.freeSlotAvail(numPendingTask)){
+            logInfo("RSB:Pre-start stage " + preStartStage.id)
+            waitingStages -= preStartStage
+            runningStages += preStartStage
+            submitMissingTasks(preStartStage, activeJobForStage(preStartStage).get)
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Merge local values from a task into the corresponding accumulators previously registered
    * here on the driver.
@@ -1296,6 +1355,14 @@ class DAGScheduler(
                 submitWaitingChildStages(shuffleStage)
               }
             }
+
+              if(removeStageBarrier && !shuffleStage.isAvailable
+                &&runningStages.contains(shuffleStage)
+                && haveEnoughCompletion(shuffleStage)){
+                logInfo("shuffle id: " + shuffleStage.id + " shuffleStage.completed.ratio:" +
+                  (1-(shuffleStage.pendingPartitions.size.toFloat / shuffleStage.numPartitions)))
+                maybePreStartWaitingStage(stage,shuffleStage.shuffleDep.shuffleId,smt.partitionId,status)
+              }
         }
 
       case Resubmitted =>
@@ -1504,6 +1571,11 @@ class DAGScheduler(
       fileLost = fileLost,
       hostToUnregisterOutputs = None,
       maybeEpoch = None)
+  }
+
+  private def haveEnoughCompletion(shuffleStage: ShuffleMapStage): Boolean ={
+    (1-(shuffleStage.pendingPartitions.size.toFloat / shuffleStage.numPartitions)
+      > removeStageBarrierThreshold/100.0)
   }
 
   private def removeExecutorAndUnregisterOutputs(
