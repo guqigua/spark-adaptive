@@ -4,6 +4,7 @@ import org.apache.spark.{ SparkEnv, TaskContext}
 import org.apache.spark.internal.{Logging, config}
 import scala.collection.mutable.{ArrayBuffer, HashSet}
 import org.apache.spark.network.shuffle.ShuffleClient
+import java.util.concurrent.atomic.AtomicInteger
 
 private[spark]
 class PartialBlockFetcherIterator(
@@ -33,9 +34,16 @@ class PartialBlockFetcherIterator(
 
   private var notNullStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])] = null
 
-  private var nextNum: Int = 0
+  private var nextNum = new AtomicInteger()
 
   statuses = SparkEnv.get.mapOutputTracker.getUpdatedStatus(shuffleId, startPartition,endPartition,startMapId.getOrElse(-1),endMapId.getOrElse(-1))
+
+  var statusSize =  {
+    var res = 0
+    statuses.foreach( x => res += x._2.size)
+    logInfo("jiang2 size: "+res)
+    res
+  }
 
   initialize()
 
@@ -97,14 +105,16 @@ class PartialBlockFetcherIterator(
       delegatedStatuses += index
     }
 
-    logInfo("Delegating " + statuses.map(_._2.size).sum +
+    logInfo("Delegating ready: " + readyStatuses.map(_._2.size).sum +
+      " blocks to a new iterator for reduce "  + " of shuffle " + shuffleId)
+    logInfo("Delegating all: " + statuses.map(_._2.size).sum +
       " blocks to a new iterator for reduce "  + " of shuffle " + shuffleId)
 
     val blockFetcherItr = new ShuffleBlockFetcherIterator(
       context,
       blockManager.shuffleClient,
       blockManager,
-      statuses,
+      readyStatuses,
       SparkEnv.get.serializerManager.wrapStream,
       // Note: we use getSizeAsMb when no suffix is provided for backwards compatibility
       SparkEnv.get.conf.getSizeAsMb("spark.reducer.maxSizeInFlight", "48m") * 1024 * 1024,
@@ -120,17 +130,17 @@ class PartialBlockFetcherIterator(
   }
 
   override def hasNext: Boolean = {
-    // Firstly see if the delegated iterators have more blocks for us
+    // Firstly see if the  iterators have more blocks for us
     if (iterator.hasNext) {
       return true
     }
     // If we have blocks not delegated yet, try to delegate them to a new iterator
     // and depend on the iterator to tell us if there are valid blocks.
-    while (delegatedStatuses.size < statuses.size) {
+    while (delegatedStatuses.size < statusSize) {
       iterator = getIterator()
       if(iterator == null) return false
       var i = 1
-      for ( i <- 1 to nextNum){
+      for ( i <- 1 to nextNum.get()){
         iterator.next()
       }
       if (iterator.hasNext) {
@@ -141,7 +151,7 @@ class PartialBlockFetcherIterator(
   }
 
   override def next(): (BlockId, InputStream) = {
-    nextNum = nextNum+1
+    nextNum.getAndIncrement()
     return iterator.next()
   }
 }

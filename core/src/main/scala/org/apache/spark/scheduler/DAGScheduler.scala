@@ -1156,9 +1156,8 @@ class DAGScheduler(
         for (preStartStage <- getPreStartableStage(stage)) {
           if(backend.freeSlotAvail(numPendingTask)){
             logInfo("RSB:Pre-start stage " + preStartStage.id)
-            waitingStages -= preStartStage
-            runningStages += preStartStage
             submitMissingTasks(preStartStage, activeJobForStage(preStartStage).get)
+            waitingStages -= preStartStage
           }
         }
       }
@@ -1356,7 +1355,7 @@ class DAGScheduler(
               }
             }
 
-              if(removeStageBarrier && !shuffleStage.isAvailable
+              if(removeStageBarrier && !shuffleStage.isAvailable && !shuffleStage.pendingPartitions.isEmpty
                 &&runningStages.contains(shuffleStage)
                 && haveEnoughCompletion(shuffleStage)){
                 logInfo("shuffle id: " + shuffleStage.id + " shuffleStage.completed.ratio:" +
