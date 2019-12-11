@@ -18,7 +18,7 @@
 package org.apache.spark.shuffle
 
 import org.apache.spark._
-import org.apache.spark.internal.{Logging, config}
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.serializer.SerializerManager
 import org.apache.spark.storage.{BlockManager, PartialBlockFetcherIterator, ShuffleBlockFetcherIterator}
 import org.apache.spark.util.CompletionIterator
@@ -61,7 +61,7 @@ private[spark] class BlockStoreShuffleReader[K, C](
         "startMapId and endMapId should be both set or unset")
     }
     val flag = SparkEnv.get.conf.getBoolean("spark.shuffle.removeStageBarrier", false)
-    val wrappedStreams = if(flag){
+    val wrappedStreams = if (flag) {
       new PartialBlockFetcherIterator(
         context,
         blockManager.shuffleClient,
@@ -73,7 +73,7 @@ private[spark] class BlockStoreShuffleReader[K, C](
         serializerManager.wrapStream,
         dep.shuffleId
       )
-    }else {
+    } else {
       new ShuffleBlockFetcherIterator(
         context,
         blockManager.shuffleClient,

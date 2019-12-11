@@ -781,7 +781,9 @@ private[spark] class MapOutputTrackerMaster(
     shuffleStatuses.clear()
   }
 
-  override def getUpdatedStatus(shuffleId: Int, startPartition: Int, endPartition: Int, startMapId: Int, endMapId: Int): Seq[(BlockManagerId, Seq[(BlockId, Long)])] = ???
+  override def getUpdatedStatus(shuffleId: Int, startPartition: Int, endPartition: Int,
+                                startMapId: Int, endMapId: Int)
+  : Seq[(BlockManagerId, Seq[(BlockId, Long)])] = null
 }
 
 /**
@@ -920,15 +922,17 @@ private[spark] class MapOutputTrackerWorker(conf: SparkConf) extends MapOutputTr
     }
   }
 
-  override def getUpdatedStatus(shuffleId: Int, startPartition: Int, endPartition: Int, startMapId: Int, endMapId: Int): Seq[(BlockManagerId, Seq[(BlockId, Long)])] = {
+  override def getUpdatedStatus(shuffleId: Int, startPartition: Int,
+                                endPartition: Int, startMapId: Int, endMapId: Int)
+  : Seq[(BlockManagerId, Seq[(BlockId, Long)])] = {
     val statuses = mapStatuses.get(shuffleId).orNull
-    if (statuses == null){
-      logInfo("Don't have all map outputs for shuffle " + shuffleId +" ,fetching them")
+    if (statuses == null) {
+      logInfo("Don't have all map outputs for shuffle " + shuffleId + " ,fetching them")
       var fetchedStatuses: Array[MapStatus] = null
       fetching.synchronized{
         // Someone else is fetching need to wait
-        if(fetching.contains(shuffleId)){
-          while (fetching.contains(shuffleId)){
+        if (fetching.contains(shuffleId)) {
+          while (fetching.contains(shuffleId)) {
             try {
               fetching.wait()
             } catch {
@@ -938,52 +942,58 @@ private[spark] class MapOutputTrackerWorker(conf: SparkConf) extends MapOutputTr
         }
         // Exist while we waited the fetch success
         fetchedStatuses = mapStatuses.get(shuffleId).orNull
-        if (fetchedStatuses == null){
+        if (fetchedStatuses == null) {
           fetching += shuffleId
         }
       }
 
-      if (fetchedStatuses == null){
+      if (fetchedStatuses == null) {
         logInfo("Doing the fetch; tracker actor = " + trackerEndpoint)
         try {
           val fetchedBytes = askTracker(GetMapOutputStatuses(shuffleId).asInstanceOf[Array[Byte]])
           fetchedStatuses = MapOutputTracker.deserializeMapStatuses(fetchedBytes)
           logInfo("Got the output location")
-        }finally {
+        } finally {
           fetching.synchronized{
             fetching -= shuffleId
             fetching.notifyAll()
           }
         }
       }
-      if (fetchedStatuses != null){
+      if (fetchedStatuses != null) {
         var isMapFinished: Boolean = true
         fetchedStatuses.synchronized{
           fetchedStatuses.map{
             sta =>
-              if (sta == null){
+              if (sta == null) {
                 isMapFinished = false
-              }else{
-                sta
               }
+              else {sta}
           }
         }
-        if (isMapFinished){
-          mapStatuses.put(shuffleId,fetchedStatuses)
+        if (isMapFinished) {
+          mapStatuses.put(shuffleId, fetchedStatuses)
           logInfo("All mapstatus is ready shuffle " + shuffleId)
         }
-        if (startMapId == -1 && endMapId == -1)
-          return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition, fetchedStatuses, false)
-        else if (endMapId <= fetchedStatuses.size) return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition, fetchedStatuses, startMapId, endMapId, false)
+        if (startMapId == -1 && endMapId == -1) {
+         return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition,
+            fetchedStatuses, false)}
+        else if (endMapId <= fetchedStatuses.size) {
+          return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition,
+            fetchedStatuses, startMapId, endMapId, false)}
         else null
       }
-    else{
-      throw new MetadataFetchFailedException(shuffleId, startPartition, "Missing all output for shuffle" + shuffleId)
+      else {
+      throw new MetadataFetchFailedException(shuffleId, startPartition,
+        "Missing all output for shuffle" + shuffleId)
     }
-  }else{
-      if(startMapId == -1 && endMapId == -1)
-        return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition, statuses, false)
-      else if(endMapId <= statuses.size) return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition, statuses, startMapId, endMapId, false)
+  } else {
+      if (startMapId == -1 && endMapId == -1) {
+        return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition,
+          statuses, false)}
+      else if (endMapId <= statuses.size) {
+        return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition,
+          statuses, startMapId, endMapId, false)}
       else null
     }
   }
@@ -1091,7 +1101,8 @@ private[spark] object MapOutputTracker extends Logging {
 
         } else {
           if (endPartition - startPartition > 1 && supportsContinuousBlockBatchFetch) {
-            val totalSize: Long = (startPartition until endPartition).map(status.getSizeForBlock).sum
+            val totalSize: Long = (startPartition until endPartition)
+              .map(status.getSizeForBlock).sum
             splitsByAddress.getOrElseUpdate(status.location, ArrayBuffer()) +=
               ((ContinuousShuffleBlockId(shuffleId, mapId,
                 startPartition, endPartition - startPartition), totalSize))
@@ -1114,7 +1125,8 @@ private[spark] object MapOutputTracker extends Logging {
           throw new MetadataFetchFailedException(shuffleId, startPartition, errorMessage)
         } else {
           if (endPartition - startPartition > 1 && supportsContinuousBlockBatchFetch) {
-            val totalSize: Long = (startPartition until endPartition).map(status.getSizeForBlock).sum
+            val totalSize: Long = (startPartition until endPartition)
+              .map(status.getSizeForBlock).sum
             splitsByAddress.getOrElseUpdate(status.location, ArrayBuffer()) +=
               ((ContinuousShuffleBlockId(shuffleId, mapId,
                 startPartition, endPartition - startPartition), totalSize))
@@ -1162,20 +1174,21 @@ private[spark] object MapOutputTracker extends Logging {
 
     logInfo("jiang statuses != null  " + a)
     logInfo("jiang startMapId  " + startMapId)
-    logInfo("jiang endMapId "+ endMapId)
+    logInfo("jiang endMapId " + endMapId)
     logInfo("jiang statuses size" + b)
     assert (statuses != null && statuses.length >= endMapId && startMapId >= 0)
     val splitsByAddress = new HashMap[BlockManagerId, ArrayBuffer[(BlockId, Long)]]
     val removeStageBarrier = SparkEnv.get.conf.getBoolean("spark.shuffle.removeStageBarrier", false)
 
-    if(removeStageBarrier){
+    if(removeStageBarrier) {
       for (mapId <- startMapId until endMapId) {
         val status = statuses(mapId)
         if (status == null) {
 
         } else {
           if (endPartition - startPartition > 1 && supportsContinuousBlockBatchFetch) {
-            val totalSize: Long = (startPartition until endPartition).map(status.getSizeForBlock).sum
+            val totalSize: Long = (startPartition until endPartition)
+              .map(status.getSizeForBlock).sum
             splitsByAddress.getOrElseUpdate(status.location, ArrayBuffer()) +=
               ((ContinuousShuffleBlockId(shuffleId, mapId,
                 startPartition, endPartition - startPartition), totalSize))
@@ -1188,7 +1201,7 @@ private[spark] object MapOutputTracker extends Logging {
         }
       }
       splitsByAddress.toSeq
-    } else{
+    } else {
     for (mapId <- startMapId until endMapId) {
       val status = statuses(mapId)
       if (status == null) {

@@ -1,24 +1,40 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.apache.spark.storage
 import java.io.InputStream
-import org.apache.spark.{ SparkEnv, TaskContext}
-import org.apache.spark.internal.{Logging, config}
-import scala.collection.mutable.{ArrayBuffer, HashSet}
-import org.apache.spark.network.shuffle.ShuffleClient
 import java.util.concurrent.atomic.AtomicInteger
+
+import scala.collection.mutable.{ArrayBuffer, HashSet}
+
+import org.apache.spark.{ SparkEnv, TaskContext}
+import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.network.shuffle.ShuffleClient
 
 private[spark]
 class PartialBlockFetcherIterator(
-                                   context: TaskContext,
-                                   shuffleClient: ShuffleClient,
-                                   blockManager: BlockManager,
-                                   startPartition: Int,
-                                   endPartition: Int,
-                                   startMapId: Option[Int] = None,
-                                   endMapId: Option[Int] = None,
-                                   streamWrapper: (BlockId, InputStream) => InputStream,
-                                   shuffleId: Int
-                                 )
-  extends Iterator[(BlockId, InputStream)] with Logging {
+    context: TaskContext,
+    shuffleClient: ShuffleClient,
+    blockManager: BlockManager,
+    startPartition: Int,
+    endPartition: Int,
+    startMapId: Option[Int] = None,
+    endMapId: Option[Int] = None,
+    streamWrapper: (BlockId, InputStream) => InputStream,
+    shuffleId: Int) extends Iterator[(BlockId, InputStream)] with Logging {
 
   private val mapOutputFetchInterval =
     SparkEnv.get.conf.getInt("spark.reducer.mapOutput.fetchInterval", 1000)
@@ -30,53 +46,57 @@ class PartialBlockFetcherIterator(
 
   private var fetchTime: Int = 1
 
-  private var statuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])] = null
 
   private var notNullStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])] = null
 
   private var nextNum = new AtomicInteger()
 
-  statuses = SparkEnv.get.mapOutputTracker.getUpdatedStatus(shuffleId, startPartition,endPartition,startMapId.getOrElse(-1),endMapId.getOrElse(-1))
+  var statuses : Seq[(BlockManagerId, Seq[(BlockId, Long)])] = SparkEnv.get.mapOutputTracker
+    .getUpdatedStatus(shuffleId, startPartition, endPartition,
+      startMapId.getOrElse(-1), endMapId.getOrElse(-1))
 
-  var statusSize =  {
+
+  var statusSize = {
     var res = 0
-    statuses.foreach( x => res += x._2.size)
-    logInfo("jiang2 size: "+res)
+    statuses.foreach(x => res += x._2.size)
     res
   }
 
-  initialize()
+  initialize
 
   // Get the updated map output
   private def updateStatuses() {
     fetchTime += 1
 
-    statuses = SparkEnv.get.mapOutputTracker.getUpdatedStatus(shuffleId, startPartition,endPartition,startMapId.getOrElse(-1),endMapId.getOrElse(-1))
+    statuses = SparkEnv.get.mapOutputTracker
+      .getUpdatedStatus(shuffleId, startPartition, endPartition,
+        startMapId.getOrElse(-1), endMapId.getOrElse(-1))
 
   }
 
 
   private def readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])] = {
-    if(statuses == null)  statuses
+    if (statuses == null) statuses
     else {
       val newStatuses = statuses
-      newStatuses.filter(_._1 != null)
-      newStatuses.foreach(x => x._2.filter(_._1 != null))
+      newStatuses.filter(item => item._1 != null).foreach(x => x._2.filter(_._1 != null))
       newStatuses
     }
   }
   // Check if there's new map outputs available
   private def newStatusesReady = {
-    if(readyStatuses == null || readyStatuses.size == 0) false
-    else hashExtraBlock(delegatedStatuses,readyStatuses)
+    if (readyStatuses == null ||readyStatuses.size == 0) false
+    else hashExtraBlock(delegatedStatuses, readyStatuses)
 
   }
-  //Check if there's new new block available
+
+  // Check if there's new new block available
   private def hashExtraBlock(delegatedStatuses: HashSet[String],
-                             readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])]): Boolean={
+                             readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])])
+  : Boolean = {
     readyStatuses.foreach( x =>
       x._2.foreach(y =>
-        if (!delegatedStatuses.contains(x._1 + y._1.toString + y._2)){
+        if (!delegatedStatuses.contains(x._1 + y._1.toString + y._2)) {
           return true
         }
       )
@@ -84,9 +104,10 @@ class PartialBlockFetcherIterator(
     false
   }
 
-  private def readyStatusesToIndex(readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])]):Seq[String] = {
+  private def readyStatusesToIndex
+  (readyStatuses: Seq[(BlockManagerId, Seq[(BlockId, Long)])]): Seq[String] = {
     val res = new ArrayBuffer[String]()
-    readyStatuses.foreach(x =>{
+    readyStatuses.foreach(x => {
       x._2.foreach( y => {
         res.append(x._1 + y._1.toString + y._2)
       })
@@ -101,7 +122,7 @@ class PartialBlockFetcherIterator(
       updateStatuses()
     }
 
-    for (index <- readyStatusesToIndex(readyStatuses) if !delegatedStatuses.contains(index)){
+    for (index <- readyStatusesToIndex(readyStatuses) if !delegatedStatuses.contains(index)) {
       delegatedStatuses += index
     }
 
@@ -125,8 +146,8 @@ class PartialBlockFetcherIterator(
     blockFetcherItr
   }
 
-  private[this] def initialize(){
-    iterator = getIterator()
+  private[this] def initialize{
+    iterator = getIterator
   }
 
   override def hasNext: Boolean = {
@@ -140,9 +161,7 @@ class PartialBlockFetcherIterator(
       iterator = getIterator()
       if(iterator == null) return false
       var i = 1
-      for ( i <- 1 to nextNum.get()){
-        iterator.next()
-      }
+      for (i <- 1 to nextNum.get)  iterator.next()
       if (iterator.hasNext) {
         return true
       }
